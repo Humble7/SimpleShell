@@ -24,6 +24,11 @@ struct cmd {
   int type;          //  ' ' (exec), | (pipe), '<' or '>' for redirection
 };
 
+struct backcmd {
+  int type;
+  struct cmd *cmd;
+};
+
 struct execcmd {
   int type;              // ' '
   char *argv[MAXARGS];   // arguments to the command to be exec-ed
@@ -43,6 +48,12 @@ struct pipecmd {
   struct cmd *right; // right side of pipe
 };
 
+struct listcmd {
+  int type;
+  struct cmd *left;
+  struct cmd *right;
+};
+
 int fork1(void);  // Fork but exits on failure.
 struct cmd *parsecmd(char*);
 
@@ -54,7 +65,8 @@ runcmd(struct cmd *cmd)
   struct execcmd *ecmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
-
+  struct listcmd *lcmd;
+    
   if(cmd == 0)
     exit(0);
   
@@ -63,12 +75,23 @@ runcmd(struct cmd *cmd)
     fprintf(stderr, "unknown runcmd\n");
     exit(-1);
 
+  case 'b':
+    cmd = (struct backcmd*)cmd;
+    if(fork1() == 0)
+      runcmd(((struct backcmd*)cmd)->cmd);
+    break;
   case ' ':
     ecmd = (struct execcmd*)cmd;
-    if(ecmd->argv[0] == 0)
+    if(ecmd->argv[0] == 0) {
       exit(0);
-    fprintf(stderr, "exec not implemented\n");
+    }
     // Your code here ...
+    char path[100] = "/bin/";
+    execv(strcat(path, ecmd->argv[0]), ecmd->argv);
+    execv(ecmd->argv[0], ecmd->argv);
+    
+    fprintf(stderr, "exec not implemented\n");
+
     break;
 
   case '>':
@@ -79,6 +102,14 @@ runcmd(struct cmd *cmd)
     runcmd(rcmd->cmd);
     break;
 
+  case ';':
+      lcmd = (struct listcmd*)cmd;
+      if(fork1() == 0)
+        runcmd(lcmd->left);
+      wait(0);
+      runcmd(lcmd->right);
+      break;
+          
   case '|':
     pcmd = (struct pipecmd*)cmd;
     fprintf(stderr, "pipe not implemented\n");
@@ -93,7 +124,7 @@ getcmd(char *buf, int nbuf)
 {
   
   if (isatty(fileno(stdin)))
-    fprintf(stdout, "$ ");
+    fprintf(stdout, "$S23 ");
   memset(buf, 0, nbuf);
   fgets(buf, nbuf, stdin);
   if(buf[0] == 0) // EOF
@@ -136,6 +167,18 @@ fork1(void)
 }
 
 struct cmd*
+backcmd(struct cmd *subcmd)
+{
+  struct backcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = 'b';
+  cmd->cmd = subcmd;
+  return (struct cmd*)cmd;
+}
+
+struct cmd*
 execcmd(void)
 {
   struct execcmd *cmd;
@@ -174,10 +217,23 @@ pipecmd(struct cmd *left, struct cmd *right)
   return (struct cmd*)cmd;
 }
 
+struct cmd*
+listcmd(struct cmd *left, struct cmd *right)
+{
+  struct listcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = ';';
+  cmd->left = left;
+  cmd->right = right;
+  return (struct cmd*)cmd;
+}
+
 // Parsing
 
 char whitespace[] = " \t\r\n\v";
-char symbols[] = "<|>";
+char symbols[] = "<|>;";
 
 int
 gettoken(char **ps, char *es, char **q, char **eq)
@@ -196,13 +252,19 @@ gettoken(char **ps, char *es, char **q, char **eq)
     break;
   case '|':
   case '<':
+  case ';':
     s++;
     break;
   case '>':
     s++;
     break;
   default:
-    ret = 'a';
+          fprintf(stdout, "test:%s", s);
+    if ((s + 6) < es && *s == 'n' && *(s+1) == 'o' && *(s+2) == 'n' && *(s+3) == 'o' && *(s+4) == 'h' && *(s+5) == 'u' && *(s+6) == 'p') {
+      ret = 'b';
+    } else {
+      ret = 'a';
+    }
     while(s < es && !strchr(whitespace, *s) && !strchr(symbols, *s))
       s++;
     break;
@@ -265,7 +327,12 @@ struct cmd*
 parseline(char **ps, char *es)
 {
   struct cmd *cmd;
+
   cmd = parsepipe(ps, es);
+  if(peek(ps, es, ";")){
+    gettoken(ps, es, 0, 0);
+    cmd = listcmd(cmd, parseline(ps, es));
+  }
   return cmd;
 }
 
@@ -319,9 +386,15 @@ parseexec(char **ps, char *es)
 
   argc = 0;
   ret = parseredirs(ret, ps, es);
-  while(!peek(ps, es, "|")){
+  while(!peek(ps, es, "|;")){
     if((tok=gettoken(ps, es, &q, &eq)) == 0)
       break;
+    
+    int isbg = 0;
+    if(tok == 'b') {
+      isbg=1;
+      tok=gettoken(ps, es, &q, &eq);
+    }
     if(tok != 'a') {
       fprintf(stderr, "syntax error\n");
       exit(-1);
@@ -333,6 +406,9 @@ parseexec(char **ps, char *es)
       exit(-1);
     }
     ret = parseredirs(ret, ps, es);
+    if (isbg) {
+      ret=backcmd(ret);
+    }
   }
   cmd->argv[argc] = 0;
   return ret;
